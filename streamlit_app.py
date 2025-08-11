@@ -134,8 +134,11 @@ with col_prev:
     st.markdown("### 👀 Preview")
     if lead_file:
         leads_df = read_any_table(lead_file)
-        st.dataframe(leads_df.head(25), use_container_width=True)
-        st.info(f"Detected {len(leads_df):,} rows.")
+        if leads_df is None or not isinstance(leads_df, pd.DataFrame) or leads_df.empty:
+            st.error("That file looks empty or unreadable. Re-export as CSV/XLSX and re-upload.")
+        else:
+            st.dataframe(leads_df.head(25), use_container_width=True)
+            st.info(f"Detected {len(leads_df):,} rows · {len(leads_df.columns)} columns.")
     else:
         st.warning("Upload your leads file to begin.")
 

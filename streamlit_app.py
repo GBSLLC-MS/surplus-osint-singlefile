@@ -135,6 +135,9 @@ with col_prev:
     if lead_file:
         leads_df = read_any_table(lead_file)
         if leads_df is None or not isinstance(leads_df, pd.DataFrame) or leads_df.empty:
+    st.error("File looks empty/unreadable. Use CSV or XLSX (if .xls, re-save as .xlsx).")
+    st.stop()
+if leads_df is None or not isinstance(leads_df, pd.DataFrame) or leads_df.empty:
             st.error("That file looks empty or unreadable. Re-export as CSV/XLSX and re-upload.")
         else:
             st.dataframe(leads_df.head(25), use_container_width=True)

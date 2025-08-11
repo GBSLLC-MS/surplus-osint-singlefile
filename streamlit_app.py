@@ -6,14 +6,39 @@ import pandas as pd
 import streamlit as st
 
 def read_any_table(upload):
+    """Robust reader for CSV/TSV/TXT/XLS/XLSX with fallbacks."""
     if upload is None:
         return None
     name = upload.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(upload)
-    if name.endswith(".tsv") or name.endswith(".txt"):
-        return pd.read_csv(upload, sep="\t")
-    return pd.read_excel(upload)
+    raw = upload.getvalue()
+
+    # Prefer explicit engines by extension
+    if name.endswith(".xlsx"):
+        try:
+            return pd.read_excel(io.BytesIO(raw), engine="openpyxl")
+        except Exception:
+            pass
+    if name.endswith(".xls"):
+        try:
+            return pd.read_excel(io.BytesIO(raw), engine="xlrd")
+        except Exception:
+            pass
+
+    # Try Excel sniff (in case the extension is wrong)
+    try:
+        return pd.read_excel(io.BytesIO(raw), engine="openpyxl")
+    except Exception:
+        pass
+
+    # Try CSV/TSV with common delimiters
+    for sep in [",", "\t", ";", "|"]:
+        for eng in ["c", "python"]:
+            try:
+                return pd.read_csv(io.BytesIO(raw), sep=sep, engine=eng, on_bad_lines="skip")
+            except Exception:
+                continue
+
+    return None  # unreadable
 
 def normalize_apn(apn: str) -> str:
     s = str(apn or "").strip()

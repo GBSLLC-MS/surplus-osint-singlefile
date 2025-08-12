@@ -6,28 +6,18 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# ---------- Google Sheets loader ----------
+# ---------- Google Sheets loader (CSV export) ----------
 
 def _extract_gsheet_id_and_gid(link: str):
-    """Accepts full share link or raw ID. Returns (sheet_id, gid)."""
     link = (link or "").strip()
     if not link:
         return None, None
-
-    # Case 1: /d/<ID>/ style
-    m = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", link)  # /d/<ID>/
     if m:
         sheet_id = m.group(1)
     else:
-        # Case 2: id=<ID> query param
         qs = parse_qs(urlparse(link).query)
-        if "id" in qs and qs["id"]:
-            sheet_id = qs["id"][0]
-        else:
-            # Maybe user pasted the bare ID
-            sheet_id = link if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", link) else None
-
-    # gid
+        sheet_id = (qs.get("id", [None])[0]) or (link if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", link) else None)
     gid_match = re.search(r"[?&]gid=(\d+)", link)
     gid = gid_match.group(1) if gid_match else "0"
     return sheet_id, gid
@@ -38,18 +28,18 @@ def _gsheet_csv_url(link: str):
         return None
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
-def load_gsheet_as_df(link: str) -> pd.DataFrame | None:
-    """Loads a Google Sheet (shared 'Anyone with the link: Viewer') as DataFrame via CSV export."""
+def load_gsheet_as_df(link: str):
     csv_url = _gsheet_csv_url(link)
     if not csv_url:
         return None
-    resp = requests.get(csv_url, timeout=20)
-    if resp.status_code != 200 or not resp.content or len(resp.content) < 10:
-        # Usually sharing is wrong; the CSV export returns tiny HTML instead of CSV
+    try:
+        resp = requests.get(csv_url, timeout=20)
+    except Exception:
         return None
-
-    # Try CSV read with a few fallbacks
+    if resp.status_code != 200 or not resp.content or len(resp.content) < 10:
+        return None
     raw = resp.content
+    # Try common separators robustly
     for sep in [",", ";", "|", "\t"]:
         for eng in ["c", "python"]:
             try:
@@ -60,7 +50,7 @@ def load_gsheet_as_df(link: str) -> pd.DataFrame | None:
                 continue
     return None
 
-# ---------- App helpers (unchanged logic) ----------
+# ---------- Helpers for enrichment ----------
 
 def normalize_apn(apn: str) -> str:
     s = str(apn or "").strip()
@@ -111,6 +101,7 @@ def merge_on_apn(base: pd.DataFrame, other: pd.DataFrame, suffix: str) -> pd.Dat
         return base
     df = base.copy()
     pw = other.copy()
+    # CSV-only merges; assume 'APN' or similar present
     for c in ["APN", "Parcel", "Parcel Number", "parcel", "parcel number"]:
         if c in pw.columns:
             pw.rename(columns={c: "APN"}, inplace=True)
@@ -123,22 +114,13 @@ def merge_on_apn(base: pd.DataFrame, other: pd.DataFrame, suffix: str) -> pd.Dat
     return merged.drop(columns=["APN_key"], errors="ignore")
 
 def to_excel_bytes(main_df: pd.DataFrame, meta: dict, batch_name: str) -> bytes:
+    # Write with XlsxWriter ONLY (no openpyxl)
     bio = io.BytesIO()
-    # Prefer XlsxWriter (doesn't require openpyxl). Fall back if needed.
-    def _write(writer):
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
         main_df.to_excel(writer, sheet_name="enriched", index=False)
         pd.DataFrame([meta]).to_excel(writer, sheet_name="meta", index=False)
-        dict_rows = [{"column": c, "example": str(main_df[c].dropna().astype(str).head(1).values[0]) if c in main_df.columns and main_df[c].notna().any() else ""} for c in main_df.columns]
+        dict_rows = [{'column': c, 'example': str(main_df[c].dropna().astype(str).head(1).values[0]) if c in main_df.columns and main_df[c].notna().any() else ''} for c in main_df.columns]
         pd.DataFrame(dict_rows).to_excel(writer, sheet_name="columns", index=False)
-
-    try:
-        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-            _write(writer)
-    except Exception:
-        # Fallback: openpyxl (if installed)
-        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-            _write(writer)
-
     bio.seek(0)
     return bio.read()
 
@@ -146,27 +128,24 @@ def to_excel_bytes(main_df: pd.DataFrame, meta: dict, batch_name: str) -> bytes:
 
 st.set_page_config(page_title="Surplus Funds OSINT", page_icon="💰", layout="wide")
 st.markdown("# 🎮 Surplus Funds OSINT — Research Console")
-st.caption("Google Sheets only. Paste a share link (Viewer). No files, no drama.")
+st.caption("Google Sheets only for leads. Optional CSV merges. No openpyxl headaches.")
 
 with st.sidebar:
-    st.markdown("### 🔗 Google Sheets")
+    st.markdown("### 🔗 Google Sheets (Leads)")
     gs_url = st.text_input(
-        "Paste Google Sheets link (share as: Anyone with the link → Viewer)",
+        "Paste Google Sheets link (Share → Anyone with the link → Viewer)",
         placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=0"
     )
     st.markdown(
         """
-        **Sharing steps**  
-        1) Open your Sheet → **Share**  
-        2) **General access:** *Anyone with the link* → **Viewer**  
-        3) Copy the link and paste it here
+        **Sheet needs headers:**  
+        APN | Property Address | City | State | Zip | County Finder
         """
     )
 
-    st.markdown("### ➕ Optional merges")
-    st.caption("Upload Propwire/PropertyRadar *exports* if you have them.")
-    propwire_file = st.file_uploader("Propwire export (CSV/XLSX)", type=["csv","xlsx","xls"], key="propwire")
-    pradar_file   = st.file_uploader("PropertyRadar export (CSV/XLSX)", type=["csv","xlsx","xls"], key="propertyradar")
+    st.markdown("### ➕ Optional merges (CSV only)")
+    propwire_csv = st.file_uploader("Propwire export (CSV only)", type=["csv"], key="propwire")
+    pradar_csv   = st.file_uploader("PropertyRadar export (CSV only)", type=["csv"], key="propertyradar")
 
     st.markdown("### 🔎 Enrichment toggles")
     use_county = st.checkbox("Generate County GIS lookups", value=True)
@@ -184,7 +163,7 @@ with col_prev:
     if gs_url:
         leads_df_preview = load_gsheet_as_df(gs_url)
         if leads_df_preview is None or leads_df_preview.empty:
-            st.error("Could not read that Sheet. Make sure sharing is 'Anyone with the link: Viewer' and it has real rows.")
+            st.error("Could not read that Sheet. Make sure sharing is 'Anyone with the link: Viewer' and the first row has headers.")
         else:
             st.dataframe(leads_df_preview.head(25), use_container_width=True)
             st.info(f"Detected {len(leads_df_preview):,} rows · {len(leads_df_preview.columns)} columns.")
@@ -229,26 +208,19 @@ with col_main:
             r.get("Property Address",""), r.get("City",""), r.get("State",""), r.get("Zip","")
         ), axis=1)
 
-        # Optional merges
-        def read_any_table(upload):
-            if upload is None: return None
-            name = upload.name.lower()
-            if name.endswith((".xlsx",".xls")):
-                try:
-                    return pd.read_excel(upload)
-                except Exception:
-                    pass
+        # Optional merges (CSV only)
+        def read_csv(upload):
+            if not upload: return None
             try:
                 return pd.read_csv(upload)
             except Exception:
                 return None
-
-        propwire_df = read_any_table(propwire_file) if propwire_file else None
-        pradar_df   = read_any_table(pradar_file) if pradar_file else None
-        if propwire_df is not None and len(propwire_df)>0:
-            df = merge_on_apn(df, propwire_df, suffix="_pw")
-        if pradar_df is not None and len(pradar_df)>0:
-            df = merge_on_apn(df, pradar_df, suffix="_pr")
+        pw_df = read_csv(propwire_csv)
+        pr_df = read_csv(pradar_csv)
+        if pw_df is not None and len(pw_df)>0:
+            df = merge_on_apn(df, pw_df, suffix="_pw")
+        if pr_df is not None and len(pr_df)>0:
+            df = merge_on_apn(df, pr_df, suffix="_pr")
 
         # Links
         if use_county:
@@ -258,7 +230,7 @@ with col_main:
         if use_social:
             df = pd.concat([df, df.apply(build_social_links, axis=1)], axis=1)
 
-        # Confidence heuristic
+        # Confidence
         df["confidence_score"] = (
             df["APN"].astype(str).str.len().clip(upper=12).fillna(0).astype(float)/12
             + (df["Property Address"].astype(str).str.len()>0).astype(int)*0.5

@@ -124,11 +124,21 @@ def merge_on_apn(base: pd.DataFrame, other: pd.DataFrame, suffix: str) -> pd.Dat
 
 def to_excel_bytes(main_df: pd.DataFrame, meta: dict, batch_name: str) -> bytes:
     bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+    # Prefer XlsxWriter (doesn't require openpyxl). Fall back if needed.
+    def _write(writer):
         main_df.to_excel(writer, sheet_name="enriched", index=False)
         pd.DataFrame([meta]).to_excel(writer, sheet_name="meta", index=False)
         dict_rows = [{"column": c, "example": str(main_df[c].dropna().astype(str).head(1).values[0]) if c in main_df.columns and main_df[c].notna().any() else ""} for c in main_df.columns]
         pd.DataFrame(dict_rows).to_excel(writer, sheet_name="columns", index=False)
+
+    try:
+        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+            _write(writer)
+    except Exception:
+        # Fallback: openpyxl (if installed)
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            _write(writer)
+
     bio.seek(0)
     return bio.read()
 
